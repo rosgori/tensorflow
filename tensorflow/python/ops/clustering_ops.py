@@ -216,11 +216,11 @@ class KMeans(object):
     output = []
     if not inputs_normalized:
       with ops.colocate_with(clusters, ignore_existing=True):
-        clusters = nn_impl.l2_normalize(clusters, dim=1)
+        clusters = nn_impl.l2_normalize(clusters, axis=1)
     for inp in inputs:
       with ops.colocate_with(inp, ignore_existing=True):
         if not inputs_normalized:
-          inp = nn_impl.l2_normalize(inp, dim=1)
+          inp = nn_impl.l2_normalize(inp, axis=1)
         output.append(1 - math_ops.matmul(inp, clusters, transpose_b=True))
     return output
 
@@ -251,7 +251,7 @@ class KMeans(object):
       # TODO(ands): Support COSINE distance in nearest_neighbors and remove
       # this.
       with ops.colocate_with(clusters, ignore_existing=True):
-        clusters = nn_impl.l2_normalize(clusters, dim=1)
+        clusters = nn_impl.l2_normalize(clusters, axis=1)
     for inp, score in zip(inputs, scores):
       with ops.colocate_with(inp, ignore_existing=True):
         (indices, distances) = gen_clustering_ops.nearest_neighbors(
@@ -286,7 +286,7 @@ class KMeans(object):
       - update_in_steps: numbers of steps left before we sync
             cluster_centers_updated back to cluster_centers.
     """
-    init_value = array_ops.constant([], dtype=dtypes.float32)
+    init_value = array_ops.placeholder_with_default([], shape=None)
     cluster_centers = variable_scope.variable(
         init_value, name=CLUSTERS_VAR_NAME, validate_shape=False)
     cluster_centers_initialized = variable_scope.variable(
@@ -613,7 +613,7 @@ class _InitializeClustersOpFactory(object):
     if self._distance_metric == COSINE_DISTANCE:
       inp = nn_impl.l2_normalize(inp, dim=1)
     return gen_clustering_ops.kmeans_plus_plus_initialization(
-        inp, math_ops.to_int64(self._num_remaining), self._seed,
+        inp, math_ops.cast(self._num_remaining, dtypes.int64), self._seed,
         self._kmeans_plus_plus_num_retries)
 
   def _kmc2_multiple_centers(self):

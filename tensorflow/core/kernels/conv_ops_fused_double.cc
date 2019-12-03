@@ -13,15 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// This include can't be in the conv_ops_fused_impl.h headers. See b/62899350.
+#if GOOGLE_CUDA
+#include "tensorflow/core/protobuf/autotuning.pb.h"
+#endif  // GOOGLE_CUDA
 #include "tensorflow/core/kernels/conv_ops_fused_impl.h"
 
 namespace tensorflow {
 
 // If we're using the alternative GEMM-based implementation of Conv2D for the
 // CPU implementation, don't register this EigenTensor-based version.
-// TODO(b/119765980): Upgrade upstream Eigen to set `m_can_use_xsmm=false` for
-// contractions with non-default contraction output kernels.
-#if !defined(USE_GEMM_FOR_CONV) && !defined(EIGEN_USE_LIBXSMM)
+#if !defined(USE_GEMM_FOR_CONV)
 TF_CALL_double(REGISTER_FUSED_CPU_CONV2D);
 #endif  // !USE_GEMM_FOR_CONV
 

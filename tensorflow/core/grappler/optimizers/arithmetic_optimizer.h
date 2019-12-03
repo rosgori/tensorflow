@@ -44,6 +44,8 @@ class ArithmeticOptimizer : public GraphOptimizer {
 
   string name() const override { return "arithmetic_optimizer"; };
 
+  bool UsesFunctionLibrary() const override { return false; }
+
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* optimized_graph) override;
 
@@ -79,6 +81,7 @@ class ArithmeticOptimizer : public GraphOptimizer {
     bool simplify_aggregation = true;
     bool convert_pow = true;
     bool convert_log1p = true;
+    bool convert_log_softmax = true;
     bool convert_expm1 = true;
     bool unary_ops_composition = true;
     bool remove_stack_strided_slice_same_axis = true;

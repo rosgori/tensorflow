@@ -16,6 +16,8 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/kernels/while_op.h"
 
 #include "absl/strings/str_split.h"
+#include "tensorflow/compiler/tf2xla/kernels/if_while_utils.h"
+#include "tensorflow/compiler/tf2xla/kernels/tensor_list_utils.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/side_effect_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
@@ -26,24 +28,49 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/literal.h"
+#include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_kernel.h"
 
 namespace tensorflow {
 
-const char kPropagateCompileTimeConsts[] = "_xla_propagate_compile_time_consts";
-
 namespace {
+
+// Verify that input resources are grouped in the end.
+Status VerifyResourceArgsGroupedAtEnd(XlaOpKernelContext* ctx,
+                                      const NameAttrList& body_name_attr) {
+  const FunctionBody* body;
+  TF_RETURN_IF_ERROR(ctx->compiler()->FindFunctionBody(body_name_attr, &body));
+  bool has_seen_resource = false;
+  for (int i = 0; i < body->arg_types.size(); i++) {
+    DataType arg_type = body->arg_types[i];
+    if (has_seen_resource) {
+      if (arg_type != DT_RESOURCE) {
+        return errors::InvalidArgument(
+            "Expect input resources are grouped in the end of while body ",
+            body_name_attr.name(), ", but the ", i, "-th argument ",
+            body->arg_nodes[i]->name(), " is not a resource.");
+      }
+    } else {
+      if (arg_type == DT_RESOURCE) {
+        has_seen_resource = true;
+      }
+    }
+  }
+  return Status::OK();
+}
 
 // Builds XlaCompiler argument descriptions `args` from `ctx`.
 Status MakeXlaCompilerArgumentsFromInputs(
     XlaOpKernelContext* ctx, std::vector<XlaCompiler::Argument>* args,
-    bool* has_uninitialized_vars, bool* has_tensor_arrays) {
+    bool* has_uninitialized_vars, bool* has_tensor_arrays,
+    bool* has_uninitialized_tensor_lists) {
   VLOG(2) << "Num inputs " << ctx->num_inputs();
   args->resize(ctx->num_inputs());
   *has_uninitialized_vars = false;
   *has_tensor_arrays = false;
+  *has_uninitialized_tensor_lists = false;
   for (int i = 0; i < ctx->num_inputs(); ++i) {
     VLOG(2) << " Input " << i << " type: " << DataTypeString(ctx->input_type(i))
             << " shape: " << ctx->InputShape(i).DebugString();
@@ -54,40 +81,32 @@ Status MakeXlaCompilerArgumentsFromInputs(
     if (type == DT_RESOURCE) {
       XlaResource* resource;
       TF_RETURN_IF_ERROR(ctx->GetResourceInput(i, &resource));
-
-      arg.initialized = resource->initialized();
-      arg.kind = XlaCompiler::Argument::kResource;
-      arg.resource_kind = resource->kind();
+      XlaCompiler::PopulateArgumentFromResource(*resource, &arg);
       if (arg.resource_kind == XlaResource::kTensorArray) {
         *has_tensor_arrays = true;
       }
-
-      arg.type = resource->type();
-      arg.shape = resource->shape();
       if (!arg.initialized) {
         *has_uninitialized_vars = true;
       }
-      arg.max_array_size = resource->max_array_size();
-      for (const auto& gradient : resource->tensor_array_gradients()) {
-        arg.tensor_array_gradients.insert(gradient.first);
-      }
-      arg.name = resource->name();
       VLOG(2) << "    resource " << resource->name()
               << " type: " << DataTypeString(arg.type)
               << " shape: " << arg.ShapeHumanString()
               << " initialized: " << arg.initialized;
-
     } else {
       arg.kind = XlaCompiler::Argument::kParameter;
-      arg.type = ctx->input_type(i);
-
-      xla::XlaBuilder* builder = ctx->builder();
-      xla::XlaOp handle = ctx->Input(i);
-      auto shape_or_status = builder->GetShape(handle);
-      if (!shape_or_status.ok()) {
-        return shape_or_status.status();
+      arg.type = type;
+      TF_ASSIGN_OR_RETURN(arg.shape, ctx->builder()->GetShape(ctx->Input(i)));
+      if (IsTensorListInput(ctx, i)) {
+        // arg.initialized == false means that the element_shape of the list
+        // was not available at the time of building the list so an empty list
+        // was created instead. If so, the body function of While is run once
+        // to infer the shape of the list before actually building the While op.
+        TF_RETURN_IF_ERROR(
+            IsTensorListInitialized(ctx->Input(i), &arg.initialized));
+        if (!arg.initialized) {
+          *has_uninitialized_tensor_lists = true;
+        }
       }
-      arg.shape = shape_or_status.ValueOrDie();
     }
   }
   return Status::OK();
@@ -263,12 +282,17 @@ XlaWhileOp::XlaWhileOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
 void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
   VLOG(1) << "WhileOp::Compile";
 
+  // Input resources need to be grouped in the end of the body function
+  // according to the convention of the XLA bridge.
+  OP_REQUIRES_OK(ctx, VerifyResourceArgsGroupedAtEnd(ctx, body_name_attr_));
+
   std::vector<XlaCompiler::Argument> arguments;
   bool has_uninitialized_vars;
   bool has_tensor_arrays;
-  OP_REQUIRES_OK(
-      ctx, MakeXlaCompilerArgumentsFromInputs(
-               ctx, &arguments, &has_uninitialized_vars, &has_tensor_arrays));
+  bool has_uninitialized_tensor_lists;
+  OP_REQUIRES_OK(ctx, MakeXlaCompilerArgumentsFromInputs(
+                          ctx, &arguments, &has_uninitialized_vars,
+                          &has_tensor_arrays, &has_uninitialized_tensor_lists));
 
   xla::XlaBuilder* builder = ctx->builder();
   XlaCompiler* compiler = ctx->compiler();
@@ -305,7 +329,6 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
   XlaCompiler::CompileOptions body_options;
   body_options.use_tuple_arg = true;
   body_options.return_updated_values_for_all_resources = true;
-  body_options.resolve_compile_time_constants = false;
   body_options.is_entry_computation = false;
   body_options.add_token_input_output = has_token_input_output_;
   XlaCompiler::CompilationResult body;
@@ -327,10 +350,13 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
   //    Hence we can use the output shapes and TensorArray gradients of each
   //    resource as the "true" shapes.
   // 2) again with the "correct" resource information determined by (1).
-  if (has_uninitialized_vars || has_tensor_arrays) {
+  if (has_uninitialized_vars || has_tensor_arrays ||
+      has_uninitialized_tensor_lists) {
     VLOG(2) << "Recompiling loop body: has_uninitialized_vars: "
             << has_uninitialized_vars
-            << " has_tensor_arrays: " << has_tensor_arrays;
+            << " has_tensor_arrays: " << has_tensor_arrays
+            << " has_uninitialized_tensor_lists: "
+            << has_uninitialized_tensor_lists;
     // Initializes any uninitialized resource with zero values of the
     // shape determined by the first compilation.
     for (int i = 0; i < body.resource_updates.size(); ++i) {
@@ -367,6 +393,23 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
         arg.tensor_array_gradients.insert(gradient.first);
       }
     }
+
+    // Set the shape of any uninitialized TensorLists to the shape determined by
+    // the first compilation. Note that, unlike resources, we do not initialize
+    // the input list with zeros here, that is done later.
+    xla::Shape body_output_shape = body.xla_output_shape;
+    OP_REQUIRES(ctx, body_output_shape.IsTuple(),
+                errors::FailedPrecondition(
+                    "xla_output_shape of while body must be a tuple."));
+    for (int i = 0; i < arguments.size(); i++) {
+      XlaCompiler::Argument& arg = arguments[i];
+      if (arg.initialized || !IsTensorListInput(ctx, i)) {
+        continue;
+      }
+      arg.shape = body_output_shape.tuple_shapes(i);
+      arg.initialized = true;
+    }
+
     // Recompile the body with the "correct" resource shapes.
     VLOG(1) << "Recompiling body with corrected resource shapes";
     body = {};
@@ -378,7 +421,6 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
 
   XlaCompiler::CompileOptions cond_options;
   cond_options.use_tuple_arg = true;
-  cond_options.resolve_compile_time_constants = false;
   cond_options.is_entry_computation = false;
   cond_options.add_token_input_output = has_token_input_output_;
   XlaCompiler::CompilationResult cond;
@@ -450,6 +492,22 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
       XlaResource* resource;
       OP_REQUIRES_OK(ctx, ctx->GetResourceInput(input_num, &resource));
       OP_REQUIRES_OK(ctx, resource->Pack(&inputs[i], builder));
+    } else if (IsTensorListInput(ctx, input_num)) {
+      xla::XlaOp input = ctx->Input(input_num);
+      auto input_shape_or = ctx->builder()->GetShape(input);
+      OP_REQUIRES_OK(ctx, input_shape_or.status());
+      xla::Shape input_shape = input_shape_or.ValueOrDie();
+      const xla::Shape& list_shape = body_input_shape.tuple_shapes(i);
+      // Shape/datatype of the input list may differ from shape/datatype of the
+      // body/cond input if the list's shape/datatype was inferred after the
+      // first compilation and the body/cond was recompiled with the updated
+      // shape/datatype of the list.
+      if (input_shape != list_shape) {
+        OP_REQUIRES_OK(ctx, CreateZerosTensorListWithShape(
+                                ctx->builder(), list_shape, &inputs[i]));
+      } else {
+        inputs[i] = ctx->Input(input_num);
+      }
     } else {
       inputs[i] = ctx->Input(input_num);
     }
@@ -481,7 +539,11 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
   int resource_index = 0;
   for (int i = 0; i < ctx->num_outputs(); ++i) {
     if (ctx->input_type(i) != DT_RESOURCE) {
-      ctx->SetOutput(i, xla::GetTupleElement(while_result, i));
+      if (IsTensorListInput(ctx, i)) {
+        ctx->SetTensorListOutput(i, xla::GetTupleElement(while_result, i));
+      } else {
+        ctx->SetOutput(i, xla::GetTupleElement(while_result, i));
+      }
       ++resource_index;
     } else {
       break;
