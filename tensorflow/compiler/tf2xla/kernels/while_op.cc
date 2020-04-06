@@ -15,23 +15,37 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/kernels/while_op.h"
 
-#include "absl/strings/str_split.h"
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
 #include "tensorflow/compiler/tf2xla/kernels/if_while_utils.h"
 #include "tensorflow/compiler/tf2xla/kernels/tensor_list_utils.h"
-#include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/side_effect_util.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_compiler.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/compiler/tf2xla/xla_resource.h"
+#include "tensorflow/compiler/xla/client/client.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/status_macros.h"
+#include "tensorflow/compiler/xla/shape.h"
+#include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
-#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/stream_executor/lib/statusor.h"
 
 namespace tensorflow {
 
@@ -123,39 +137,45 @@ void GetLoopInvariants(XlaOpKernelContext* ctx,
     const Node* ret = body->ret_nodes[i];
     const Node* ret_input_0;
     OP_REQUIRES_OK(ctx, ret->input_node(0, &ret_input_0));
-    (*loop_invariants)[i] = ret_input_0->id() == arg->id();
+    (*loop_invariants)[i] = (ret_input_0->id() == arg->id());
   }
 }
 
-// Converts entries in `args` which are loop invariants and have compile
-// time constant inputs to constants so that they can be propagated in the loop
-// body.
+// Converts entries in `args` which are loop invariants and have compile time
+// constant inputs and need to be constants in order to be compilable to
+// constants so that they can be propagated in the loop body.
 Status ConvertLoopInvariantsToConst(
     XlaOpKernelContext* ctx, const NameAttrList& body_name_attr,
+    const NameAttrList& cond_name_attr,
     std::vector<XlaCompiler::Argument>* args,
     std::vector<bool>* compile_time_const_arg_indices,
     int* num_compile_time_const_args, xla::Client* client) {
   std::vector<bool> loop_invariants(ctx->num_inputs());
   GetLoopInvariants(ctx, body_name_attr, &loop_invariants);
-  for (int i = 0; i < ctx->num_inputs(); i++) {
-    XlaCompiler::Argument& arg = (*args)[i];
-    const XlaExpression& expression = ctx->InputExpression(i);
-    // If this is a loop invariant and the input tensor is a compile time
-    // constant build a kConstant type argument.
-    if (arg.kind != XlaCompiler::Argument::kResource && loop_invariants[i]) {
-      // NOTE: We can not simple check that this is Kind::kConstant because
-      // this could be the output of a MetadataOnly op e.g. Size.
-      xla::StatusOr<absl::optional<Tensor>> maybe_constant =
-          expression.ResolveConstant(client);
-      if (maybe_constant.ok() && maybe_constant.ValueOrDie().has_value()) {
-        arg.kind = XlaCompiler::Argument::kConstant;
-        arg.type = expression.dtype();
-        arg.constant_value = std::move(maybe_constant.ValueOrDie().value());
-        arg.shape = expression.GetShape().ValueOrDie();
-        compile_time_const_arg_indices->at(i) = true;
-        (*num_compile_time_const_args)++;
-      }
-    }
+
+  std::vector<bool> body_must_be_const_nodes;
+  const FunctionBody* body;
+  std::vector<bool> cond_must_be_const_nodes;
+  const FunctionBody* cond;
+  TF_RETURN_IF_ERROR(FindMustBeConstNodes(ctx, body_name_attr,
+                                          &body_must_be_const_nodes, &body));
+  TF_RETURN_IF_ERROR(FindMustBeConstNodes(ctx, cond_name_attr,
+                                          &cond_must_be_const_nodes, &cond));
+
+  auto should_convert_to_const = [&](int arg_idx) {
+    XlaCompiler::Argument& arg = (*args)[arg_idx];
+    return arg.kind != XlaCompiler::Argument::kResource &&
+           loop_invariants[arg_idx] &&
+           (body_must_be_const_nodes[body->arg_nodes[arg_idx]->id()] ||
+            cond_must_be_const_nodes[cond->arg_nodes[arg_idx]->id()]);
+  };
+  absl::InlinedVector<int, 5> converted_constants =
+      ConvertCompileTimeConstArgumentsToConst(ctx, args,
+                                              /*xla_expression_offset=*/0,
+                                              should_convert_to_const);
+  for (int arg_idx : converted_constants) {
+    compile_time_const_arg_indices->at(arg_idx) = true;
+    (*num_compile_time_const_args)++;
   }
   return Status::OK();
 }
@@ -311,7 +331,7 @@ void XlaWhileOp::Compile(XlaOpKernelContext* ctx) {
   int num_compile_time_const_args = 0;
   if (propagate_compile_time_consts_) {
     OP_REQUIRES_OK(ctx, ConvertLoopInvariantsToConst(
-                            ctx, body_name_attr_, &arguments,
+                            ctx, body_name_attr_, cond_name_attr_, &arguments,
                             &compile_time_const_arg_indices,
                             &num_compile_time_const_args, compiler->client()));
   }

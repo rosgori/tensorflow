@@ -49,6 +49,7 @@ cc_library(
         "//tensorflow/lite/toco:tooling_util",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/compiler/mlir/lite/python:graphdef_to_tfl_flatbuffer",
+        "//tensorflow/compiler/mlir/lite/python:saved_model_to_tfl_flatbuffer",
     ] + select({
         # This is required when running `tflite_convert` from `bazel`.
         # It requires to link with TensorFlow Ops to get the op definitions.
@@ -77,7 +78,7 @@ py_library(
 py_binary(
     name = "toco_from_protos",
     srcs = ["toco_from_protos.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/python:_pywrap_toco_api",
@@ -89,13 +90,14 @@ py_binary(
 tf_py_test(
     name = "toco_from_protos_test",
     srcs = ["toco_from_protos_test.py"],
-    additional_deps = [
-        "//tensorflow:tensorflow_py",
-        "//tensorflow/lite/toco:model_flags_proto_py",
-        "//tensorflow/lite/toco:toco_flags_proto_py",
-    ],
+    python_version = "PY3",
     tags = [
         "no_oss",
         "no_pip",
+    ],
+    deps = [
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/lite/toco:model_flags_proto_py",
+        "//tensorflow/lite/toco:toco_flags_proto_py",
     ],
 )

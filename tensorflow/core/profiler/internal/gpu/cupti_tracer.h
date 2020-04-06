@@ -41,6 +41,10 @@ struct MemcpyDetails {
   // This contains CUpti_ActivityMemcpyKind for activity event (on device).
   // For events from other CuptiTracerEventSource, it is always 0.
   int8 kind;
+  // CUpti_ActivityMemoryKind of source.
+  int8 src_mem_kind;
+  // CUpti_ActivityMemoryKind of destination.
+  int8 dst_mem_kind;
 };
 
 struct MemAllocDetails {
@@ -168,7 +172,7 @@ class AnnotationMap {
 
  private:
   struct PerDeviceAnnotationMap {
-    // The population/consuption of annotations might happen from multiple
+    // The population/consumption of annotations might happen from multiple
     // callback/activity api related threads.
     absl::Mutex mutex;
     // Annotation tends to be repetitive, use a hash_set to store the strings,
@@ -235,6 +239,7 @@ class CuptiTracer {
 
   // Only one profile session can be live in the same time.
   bool IsAvailable() const;
+  bool NeedRootAccess() const { return need_root_access_; }
 
   void Enable(const CuptiTracerOptions& option, CuptiTraceCollector* collector);
   void Disable();
@@ -266,6 +271,9 @@ class CuptiTracer {
   absl::optional<CuptiTracerOptions> option_;
   CuptiInterface* cupti_interface_ = nullptr;
   CuptiTraceCollector* collector_ = nullptr;
+
+  // CUPTI 10.1 and higher need root access to profile.
+  bool need_root_access_ = false;
 
   bool api_tracing_enabled_ = false;
   // Cupti handle for driver or runtime API callbacks. Cupti permits a single

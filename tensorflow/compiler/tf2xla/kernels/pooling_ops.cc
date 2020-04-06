@@ -15,6 +15,12 @@ limitations under the License.
 
 // XLA specific pooling ops.
 
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
@@ -23,15 +29,22 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/lib/arithmetic.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/lib/pooling.h"
+#include "tensorflow/compiler/xla/client/padding.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/client/xla_computation.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/framework/bounds_check.h"
+#include "tensorflow/compiler/xla/shape.h"
+#include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/compiler/xla/types.h"
+#include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/register_types.h"
-#include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/pooling_ops_common.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/util/padding.h"
+#include "tensorflow/core/util/tensor_format.h"
+#include "tensorflow/stream_executor/lib/statusor.h"
+#include "tensorflow/stream_executor/stream_executor.h"
 
 namespace tensorflow {
 namespace {
@@ -157,6 +170,13 @@ class MaxPoolOp : public PoolingOp {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("data_format", &data_format_str));
     OP_REQUIRES(ctx, FormatFromString(data_format_str, &data_format_),
                 errors::InvalidArgument("Invalid data format"));
+    OP_REQUIRES(
+        ctx,
+        data_format_ != FORMAT_NCHW_VECT_C &&
+            data_format_ != FORMAT_NHWC_VECT_W,
+        errors::Unimplemented("XLA does not support the VECT_* data formats. "
+                              "Returning unimplemented from MaxPool to keep "
+                              "Tensorflow's intended optimized MaxPool here."));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
@@ -329,7 +349,7 @@ class MaxPoolGradOp : public XlaOpKernel {
         (padding_ == VALID) ? xla::Padding::kValid : xla::Padding::kSame;
 
     // Create a MaxPool operation to check the expected resulting shape, and
-    // then throw away the operation because we don't actually neeed it here.
+    // then throw away the operation because we don't actually need it here.
     TensorShape expected_out_shape;
     auto pooling =
         xla::MaxPool(ctx->Input(0), ksize_, stride_, xla_padding,

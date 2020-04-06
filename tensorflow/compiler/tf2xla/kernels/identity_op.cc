@@ -13,8 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/compiler/tf2xla/kernels/tensor_list_utils.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/macros.h"
 
 namespace tensorflow {
 namespace {
@@ -25,10 +29,15 @@ class IdentityOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* ctx) override {
     for (int i = 0; i < ctx->num_inputs(); ++i) {
-      // Forwards using the underlying op_kernel_context so both tensor and
-      // resource values are forwarded correctly.
-      ctx->op_kernel_context()->set_output(i,
-                                           ctx->op_kernel_context()->input(i));
+      if (IsTensorListInput(ctx, i)) {
+        ctx->SetTensorListOutput(i, ctx->Input(i));
+      } else {
+        DCHECK(ctx->input_type(i) != DT_VARIANT);
+        // Forwards using the underlying op_kernel_context so both tensor and
+        // resource values are forwarded correctly.
+        ctx->op_kernel_context()->set_output(
+            i, ctx->op_kernel_context()->input(i));
+      }
     }
   }
 
@@ -48,7 +57,7 @@ REGISTER_XLA_OP(Name("IdentityN")
                 IdentityOp);
 REGISTER_XLA_OP(Name("PlaceholderWithDefault"), IdentityOp);
 REGISTER_XLA_OP(Name("PreventGradient"), IdentityOp);
-REGISTER_XLA_OP(Name("StopGradient"), IdentityOp);
+REGISTER_XLA_OP(Name("StopGradient").AllowVariantTypes(), IdentityOp);
 REGISTER_XLA_OP(Name("Snapshot"), IdentityOp);
 
 }  // namespace

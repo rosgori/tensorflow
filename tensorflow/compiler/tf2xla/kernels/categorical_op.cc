@@ -15,21 +15,26 @@ limitations under the License.
 
 // XLA implementations of Categorical op.
 
+#include <array>
+#include <string>
+
 #include "tensorflow/compiler/tf2xla/kernels/random_ops_util.h"
-#include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/lib/arithmetic.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/prng.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/shape.h"
+#include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -123,8 +128,8 @@ class CategoricalOp : public XlaOpKernel {
                                     xla::PrimitiveType type,
                                     XlaOpKernelContext* ctx) {
     xla::XlaBuilder* builder = ctx->builder();
-    LOG(WARNING) << "Warning: Using tf.random.categorical with XLA compilation"
-                    " will ignore seeds.";
+    LOG_FIRST_N(WARNING, 1) << "Warning: Using tf.random.categorical with XLA"
+                               " compilation will ignore seeds.";
     // We want a number in (0, 1) rather than [0, 1) or (0, 1]:
     // * log(-log(0)) is ∞.
     // * log(-log(1)) is -∞.

@@ -15,20 +15,26 @@ limitations under the License.
 
 // Native XLA implementations of simple binary Ops
 
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/kernels/cwise_ops.h"
-#include "tensorflow/compiler/tf2xla/lib/broadcast.h"
-#include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
+#include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/client_library.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/lib/math.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/primitive_util.h"
+#include "tensorflow/compiler/xla/shape.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/util/bcast.h"
+#include "tensorflow/stream_executor/lib/statusor.h"
 
 namespace tensorflow {
 namespace {
@@ -151,6 +157,15 @@ xla::XlaOp XlogyImpl(xla::XlaOp x, xla::XlaOp y,
 }
 XLA_MAKE_BINARY(Xlogy, XlogyImpl(lhs, rhs, broadcast_helper));
 
+xla::XlaOp Xlog1pyImpl(xla::XlaOp x, xla::XlaOp y,
+                       const BCast& broadcast_helper) {
+  auto non_zero = xla::Mul(x, xla::Log1p(y));
+  auto zero = xla::ZerosLike(non_zero);
+  auto x_is_zero = xla::Eq(x, zero);
+  return xla::Select(x_is_zero, zero, non_zero);
+}
+XLA_MAKE_BINARY(Xlog1py, Xlog1pyImpl(lhs, rhs, broadcast_helper));
+
 xla::XlaOp XdivyImpl(xla::XlaOp x, xla::XlaOp y,
                      const BCast& broadcast_helper) {
   std::tie(x, y) = XlaBinaryOp::Broadcast(x, y, broadcast_helper);
@@ -246,6 +261,39 @@ xla::XlaOp SquaredDifferenceImpl(DataType dtype, xla::XlaOp x, xla::XlaOp y,
 XLA_MAKE_BINARY(SquaredDifference,
                 SquaredDifferenceImpl(input_type(0), lhs, rhs,
                                       extend_dimensions));
+
+xla::XlaOp IgammaImpl(xla::XlaOp x, xla::XlaOp y,
+                      const BCast& broadcast_helper) {
+  std::tie(x, y) = XlaBinaryOp::Broadcast(x, y, broadcast_helper);
+  return xla::Igamma(x, y);
+}
+
+XLA_MAKE_BINARY(Igamma, IgammaImpl(lhs, rhs, broadcast_helper));
+
+xla::XlaOp IgammaGradAImpl(xla::XlaOp x, xla::XlaOp y,
+                           const BCast& broadcast_helper) {
+  std::tie(x, y) = XlaBinaryOp::Broadcast(x, y, broadcast_helper);
+  return xla::IgammaGradA(x, y);
+}
+
+XLA_MAKE_BINARY(IgammaGradA, IgammaGradAImpl(lhs, rhs, broadcast_helper));
+
+xla::XlaOp RandomGammaGradImpl(xla::XlaOp x, xla::XlaOp y,
+                               const BCast& broadcast_helper) {
+  std::tie(x, y) = XlaBinaryOp::Broadcast(x, y, broadcast_helper);
+  return xla::RandomGammaGrad(x, y);
+}
+
+XLA_MAKE_BINARY(RandomGammaGrad,
+                RandomGammaGradImpl(lhs, rhs, broadcast_helper));
+
+xla::XlaOp IgammacImpl(xla::XlaOp x, xla::XlaOp y,
+                       const BCast& broadcast_helper) {
+  std::tie(x, y) = XlaBinaryOp::Broadcast(x, y, broadcast_helper);
+  return xla::Igammac(x, y);
+}
+
+XLA_MAKE_BINARY(Igammac, IgammacImpl(lhs, rhs, broadcast_helper));
 
 #undef XLA_MAKE_BINARY
 
